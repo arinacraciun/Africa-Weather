@@ -27,4 +27,5 @@ def download_era5_data(output_path, year, month):
     )
 
 if __name__ == "__main__":
-    download_era5_data('data/raw/era5_africa_2023_01.grib', '2023', '01')
+    # download_era5_data('data/raw/era5_africa_2023_01.grib', '2023', '01')
+    download_era5_data('data/raw/era5_africa_2023_02.grib', '2023', '02')
