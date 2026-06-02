@@ -5,7 +5,6 @@ import os
 from src.data_processing.processor import load_and_preprocess
 from src.evaluation.inference import load_model_and_graph, autoregressive_rollout
 from src.evaluation.reconstruct import reconstruct_forecast
-from src.evaluation.metrics import calculate_deterministic_metrics
 
 def prepare_test_data(raw_grib_path):
     """Loads the test data and prepares it as obs_ds."""
@@ -38,7 +37,7 @@ def extract_initial_state(obs_ds, start_idx=0, mean=0, std=1):
 
 def main():
     # --- 1. Configuration ---
-    CKPT_PATH = "lightning_logs/version_4/checkpoints/epoch=14-step=11145.ckpt" 
+    CKPT_PATH = "lightning_logs/version_6/checkpoints/epoch=12-step=9659.ckpt" 
     GRAPH_PATH = "data/processed/static_graph.pt"
     TEST_DATA_PATH = "data/raw/era5_africa_2023_02.grib"
     FORECAST_HOURS = 72 # 3 days of hourly forecasts
