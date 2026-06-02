@@ -51,6 +51,13 @@ def get_station_data(city_name, lat, lon, start_date, end_date):
 def process_ground_truth_cities(cities_dict, start_date, end_date, output_dir):
     """
     Iterates through a dictionary of cities and saves their station data to CSV.
+
+    TODO (Bias Correction): 
+    The current pipeline downloads this point-truth data but does not map it to the 
+    ERA5 grid. I will need to implement a routing mechanism that identifies the 
+    specific PyG graph node indices closest to these coordinates. These nodes' 
+    predictions will later be routed into an MLP trained against this CSV data 
+    to correct local terrain biases.
     """
     os.makedirs(output_dir, exist_ok=True)
     for city, coords in cities_dict.items():
@@ -108,6 +115,11 @@ def load_and_preprocess(file_path):
         
     Returns:
         xarray.Dataset: The preprocessed dataset.
+
+    IMPLEMENTATION NOTE - Lazy Loading:
+    ERA5 grid data is massive. By explicitly defining the `chunks` dictionary, xarray 
+    defers loading the data into RAM. Instead, Dask processes the operations in parallel 
+    across CPU cores, preventing memory overflow.
     """
     ds = xr.open_dataset(
         file_path, 
@@ -135,6 +147,12 @@ def extract_features(ds):
         
     Returns:
         xarray.DataArray: Lazily evaluated wind speed.
+
+    TODO (Architectural Upgrade - Temporal Embeddings):
+    The model is currently "time-blind". Implement sine and cosine wave embeddings 
+    for the 'hour of day' and 'day of year' here. Append these cyclic features 
+    alongside the weather variables so the GNN can learn diurnal cycles (e.g., 
+    temperature dropping at night).
     """
     wind_speed = (ds['u']**2 + ds['v']**2)**0.5
     return wind_speed
@@ -150,6 +168,12 @@ def format_for_anemoi(ds, output_zarr_path):
         
     Returns:
         xarray.Dataset: The chunked and stacked dataset.
+
+    IMPLEMENTATION NOTE - Zarr MultiIndex Fix:
+    When stacking spatial dimensions (lat/lon) into a 1D 'node' dimension for GNN processing,
+    xarray creates a Pandas MultiIndex. The Zarr backend cannot write MultiIndex arrays directly.
+    Calling `.reset_index('node')` strips this behavior, explicitly storing lat and lon as 
+    data variables associated with the nodes, guaranteeing safe serialization to disk.
     """
     # Flatten spatial grid into a 1D 'node' dimension and drop invalid geometries
     ds_stacked = ds.stack(node=['latitude', 'longitude']).dropna(dim='node')
@@ -176,6 +200,12 @@ def calculate_and_save_global_stats(zarr_path, output_dir):
     Args:
         zarr_path (str): Path to the processed Zarr dataset.
         output_dir (str): Directory to save the resulting .npy files.
+
+    IMPLEMENTATION NOTE - Critical Normalization:
+    Meteorological variables have vastly different scales (e.g., Geopotential Height is ~10^5, 
+    Specific Humidity is ~10^-3). Passing raw data into a GNN causes gradients to explode, 
+    resulting in infinite loss or failure to converge. Saving the strict climatological 
+    mean and std enables strict Z-score normalization (Mean=0, Std=1) for model inputs.
     """
     print(f"Loading dataset from {zarr_path} to compute stats...")
     ds = xr.open_zarr(zarr_path)
@@ -209,6 +239,13 @@ def create_spherical_graph(latitudes, longitudes, k_neighbors=6):
         
     Returns:
         torch_geometric.data.Data: Graph structure with edges, attributes, and positions.
+
+    IMPLEMENTATION NOTE - Solving the "Pole Problem":
+    Standard 2D latitude/longitude grids suffer from severe distortion near the poles, 
+    where longitude lines converge. Using Euclidean distance on a 2D grid calculates 
+    incorrect spatial proximity. Converting the spherical coordinates into 3D Cartesian 
+    space (x, y, z) allows the NearestNeighbors algorithm to calculate true geographic 
+    distances, maintaining accurate message passing across the entire planetary surface.
     """
     R = 6371.0 # Earth radius in km
     lat_rad = np.radians(latitudes)

@@ -47,17 +47,25 @@ def extract_initial_state(obs_ds, start_idx, mean, std):
     """
     Extracts the atmospheric state at a specific time, flattens it for the GNN, 
     and applies the training normalization.
+
+    [TODO] INJECT TEMPORAL CONTEXT
+    Before returning this tensor, calculate the sine/cosine embeddings for the
+    current hour and day of the year. Concatenate these directly to the feature
+    vector so the model gains awareness of diurnal and seasonal cycles.
     """
     snap = obs_ds.isel(time=start_idx)
     
-    # Stack the 2D grid into the 1D 'node' dimension and drop NaNs
+    # [REASONING] We stack the 2D spatial grid directly into a 1D node dimension 
+    # to match the spherical K-Nearest Neighbors graph topology expected by PyG.
     snap_stacked = snap.stack(node=['latitude', 'longitude']).dropna(dim='node')
     
     # Stack weather variables and pressure levels into 'features'
     arr = snap_stacked.to_array(dim='variable')
     arr = arr.stack(features=['variable', 'isobaricInhPa']).transpose('node', 'features')
     
-    # Apply normalization
+    # [REASONING] Normalization is strictly applied using the training dataset's mean and std. 
+    # This ensures the inputs are scaled properly (preventing massive loss values) 
+    # and prevents data leakage from the test set into the evaluation protocol.
     val = arr.values
     val_normalized = (val - mean) / (std + 1e-6)
     
@@ -70,11 +78,20 @@ def extract_initial_state(obs_ds, start_idx, mean, std):
 def load_model_and_graph(checkpoint_path, graph_path, num_features=30):
     """
     Loads the trained PyTorch Lightning model and the static PyG graph.
+
+    [TODO] EXPAND THE RECEPTIVE FIELD
+    If migrating to an Encoder-Processor-Decoder (e.g., GraphCast architecture) 
+    to allow information to travel globally in a single forward pass, initialize 
+    the multi-mesh graph structures here instead of the basic KNN graph.
+        
+    [TODO] PROBABILISTIC FORECASTING (Phase 3)
+    When migrating to a Gaussian NLL output, update out_channels to `num_features * 2` 
+    (yielding both the mean and variance for every target variable).
     """
     model = WeatherLightningModule.load_from_checkpoint(
         checkpoint_path,
         in_channels=num_features,
-        hidden_channels=64,
+        hidden_channels=128, # Increased capacity for complex spatial patterns
         out_channels=num_features
     )
     model.eval() 
@@ -85,6 +102,11 @@ def load_model_and_graph(checkpoint_path, graph_path, num_features=30):
 def autoregressive_rollout(model, graph, initial_state, steps=24):
     """
     Generates a forecast by feeding predictions back into the model recursively.
+
+    [TODO] PROBABILISTIC SAMPLING
+    Once the model outputs a probability distribution (mean and variance), you must 
+    sample from that distribution here to generate an ensemble member, rather than 
+    just passing the deterministic output forward.
     """
     predictions = []
     current_state = initial_state
@@ -97,6 +119,10 @@ def autoregressive_rollout(model, graph, initial_state, steps=24):
                 edge_attr=graph.edge_attr
             )
             
+            # [REASONING] By recursively feeding the state back in, we simulate the forward 
+            # progression of time. Because the model uses a residual architecture (xt+1 = xt + GNN(xt)), 
+            # this loop remains mathematically stable instead of accumulating exponential errors 
+            # into the billions, successfully preventing numerical explosion.
             next_state = model.gnn(batch.x, batch.edge_index)
             predictions.append(next_state.numpy())
             current_state = next_state
@@ -120,6 +146,11 @@ def reconstruct_forecast(predictions, template_ds, mean, std):
     num_levels = len(template_ds.isobaricInhPa)
     
     # Reshape back to 5D: (time, lat, lon, variable, level)
+    # [REASONING] DATA BLEED FIX
+    # We explicitly reverse the order of the original stacking operation: 
+    # (time, node, feature) where feature was (variable, level).
+    # This precise isolation ensures high-magnitude variables (like Geopotential Height) 
+    # do not cross-contaminate low-magnitude variables (like Temperature).
     reshaped = unnormalized_preds.reshape(
         len(times), num_lats, num_lons, num_vars, num_levels
     )
@@ -149,6 +180,9 @@ def create_climatology(historical_ds):
     """
     Creates a simple baseline by averaging historical data by day of the year.
     """
+    # [REASONING] The Anomaly Correlation Coefficient (ACC) requires a baseline. 
+    # If the model predicts summer temperatures in summer, it hasn't necessarily 
+    # shown skill. It must accurately predict the *deviations* from the norm.
     return historical_ds.groupby('time.dayofyear').mean('time')
 
 def calculate_deterministic_metrics(forecast_ds, obs_ds, climatology_ds):
@@ -286,6 +320,8 @@ def plot_forecast_vs_actual(forecast_ds, obs_ds, variable_name='t', target_hour=
 def run_evaluation_pipeline():
     """
     Orchestrates the entire inference, evaluation, and plotting workflow.
+
+    TODO BIAS CORRECTION & DOWNSCALING (read below, after 3. Generate Forecast)
     """
     # Configuration
     CKPT_PATH = "lightning_logs/version_6/checkpoints/epoch=12-step=9659.ckpt" 
@@ -311,8 +347,17 @@ def run_evaluation_pipeline():
     print(f"Running autoregressive forecast for {FORECAST_HOURS} hours...")
     raw_predictions = autoregressive_rollout(model, graph, initial_state, steps=FORECAST_HOURS)
     
+    # [TODO] BIAS CORRECTION & DOWNSCALING
+    # Before converting back to 2D xarray formats, extract the specific 1D node indices 
+    # that map geographically to Nairobi, Lagos, and Johannesburg.
+    # Feed those specific node predictions through your secondary Multi-Layer Perceptron (MLP) 
+    # to correct localized terrain biases against the Meteostat ground truth CSVs.
+
     # 4. Reconstruct Forecast to Xarray 
     print("Reconstructing predictions into 2D maps...")
+
+    # [REASONING] We shift the slice by +1 because the autoregressive rollout begins predicting 
+    # at t+1. Evaluating hour 1 predictions against hour 0 observations invalidates the scoring.
     template_ds = obs_ds_full.isel(time=slice(1, FORECAST_HOURS + 1)) 
     forecast_ds = reconstruct_forecast(raw_predictions, template_ds, mean=TRAIN_MEAN, std=TRAIN_STD)
     
