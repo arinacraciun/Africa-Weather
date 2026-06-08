@@ -1,0 +1,20 @@
+name: weather_gnn
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch>=2.1.0
+  - torch-geometric
+  - pytorch-lightning
+  - xarray
+  - dask
+  - zarr
+  - cdsapi
+  - cfgrib
+  - xskillscore
+  - matplotlib
+  - cartopy
+  - pip:
+      - meteostat
